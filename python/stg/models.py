@@ -222,7 +222,10 @@ class STGRegressionModel(MLPModel, ModelIOKeysMixin):
             return total_loss, dict(), dict()
         else:
             return self._compose_output(pred)
-    
+    def _compose_output(self, logits):
+        value = self.softmax(logits)
+        _, pred = value.max(dim=1)
+        return dict(prob=value, pred=pred, logits=logits)
 
 class STGClassificationModel(MLPModel, ModelIOKeysMixin):
     def __init__(self, input_dim, nr_classes, hidden_dims, device, batch_norm=None, dropout=None, activation='relu',
