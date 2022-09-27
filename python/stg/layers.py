@@ -17,7 +17,7 @@ class FeatureSelector(nn.Module):
     
     def forward(self, prev_x):
         z = self.mu + self.sigma*self.noise.normal_()*self.training 
-        stochastic_gate = self.hard_sigmoid(z)
+        stochastic_gate = self.hard_sigmoid(z).to(self.device)
         new_x = prev_x * stochastic_gate
         return new_x
     

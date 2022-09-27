@@ -164,6 +164,40 @@ class LSPINRegressionModel(LSPINModel, ModelIOKeysMixin):
             raise NotImplementedError()
 
 class LSPINClassificationModel(MLPModel, ModelIOKeysMixin):
+    def __init__(self, input_dim, output_dim, hidden_dims, gating_net_hidden_dims,
+                device, batch_norm=None, dropout=None,
+                activation='relu', sigma=1.0, lam=0.1):
+        super().__init__(input_dim, output_dim, hidden_dims,
+                         batch_norm=batch_norm, dropout=dropout, activation='identity')
+        #self.FeatureSelector = FeatureSelector(input_dim, sigma, device)
+        self.FeatureSelector = GatingNet(input_dim, gating_net_hidden_dims, sigma,
+                             device, activation=activation, batch_norm=batch_norm,
+                             dropout=dropout)
+        self.loss = nn.CrossEntropyLoss()
+        self.reg = self.FeatureSelector.regularizer
+        self.lam = lam
+        #self.mu = self.FeatureSelector.mu
+        self.sigma = self.FeatureSelector.sigma
+
+    def forward(self, feed_dict):
+        x, mu = self.FeatureSelector(self._get_input(feed_dict))
+        pred = super().forward(x)
+        if self.training:
+            loss = self.loss(pred, self._get_label(feed_dict))
+            reg = torch.mean(self.reg((mu + 0.5)/self.sigma))
+            total_loss = loss + self.lam * reg
+            return total_loss, dict(), dict()
+        else:
+            return self._compose_output(pred)
+
+    def get_gates(self, mode, x):
+        mu = self.FeatureSelector.calc_mu(x)
+        if mode == 'raw':
+            return mu.detach().cpu().numpy()
+        elif mode == 'prob':
+            return np.minimum(1.0, np.maximum(0.0, mu.detach().cpu().numpy() + 0.5))
+        else:
+            raise NotImplementedError()
     pass
 
 class STGRegressionModel(MLPModel, ModelIOKeysMixin):
