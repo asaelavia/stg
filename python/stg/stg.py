@@ -1,6 +1,11 @@
+import copy
+
 import torch
 import torch.nn as nn
+from torch import optim
 from torch.utils.data import DataLoader
+
+from encoder import Discriminator
 from .models import STGClassificationModel, STGRegressionModel, MLPClassificationModel, MLPRegressionModel, STGCoxModel, MLPCoxModel, L1RegressionModel, SoftThreshRegressionModel, L1GateRegressionModel, LSPINRegressionModel, LSPINClassificationModel
 from .utils import get_optimizer, as_tensor, as_float, as_numpy, as_cpu, SimpleDataset, FastTensorDataLoader, probe_infnan
 from .io import load_state_dict, state_dict
@@ -53,8 +58,8 @@ def _standard_truncnorm_sample(lower_bound, upper_bound, sample_shape=torch.Size
 
 class STG(object):
     def __init__(self, device, input_dim=784, output_dim=10, hidden_dims=[400, 200],
-                activation='relu', sigma=0.5, lam=0.01,
-                optimizer='Adam', learning_rate=1e-2,  batch_size=100, freeze_onward=None, feature_selection=True, weight_decay=1e-3,
+                activation='relu', sigma=0.5, lam=1,
+                optimizer='Adam', learning_rate=5e-2,  batch_size=100, freeze_onward=None, feature_selection=True, weight_decay=1e-3,
                 task_type='classification', report_maps=False, random_state=1, extra_args=None):
         self.batch_size = batch_size
         self.activation = activation
@@ -211,6 +216,21 @@ class STG(object):
             res.append(output_dict_np['pred'])
         return np.concatenate(res, axis=0)
 
+    def predict_target(self, X, verbose=True):
+        dataset = SimpleDataset(X)
+        data_loader = DataLoader(dataset, batch_size=X.shape[0], shuffle=False)
+        res = []
+        self._model_trg.eval()
+        for feed_dict in data_loader:
+            feed_dict_np = as_numpy(feed_dict)
+            feed_dict = as_tensor(feed_dict)
+            with torch.no_grad():
+                feed_dict['input'] = feed_dict['input'].to(self.device)
+                output_dict = self._model_trg(feed_dict)
+            output_dict_np = as_numpy(output_dict)
+            res.append(output_dict_np['pred'])
+        return np.concatenate(res, axis=0)
+
     def train_epoch(self, data_loader, meters=None):
         if meters is None:
             meters = GroupMeters()
@@ -231,6 +251,7 @@ class STG(object):
             meters = GroupMeters()
 
         for epoch in range(1, 1 + nr_epochs):
+            print(epoch)
             meters.reset()
             if epoch == self.freeze_onward:
                 self._model.freeze_weights()
@@ -243,6 +264,84 @@ class STG(object):
                 flag = early_stop(self._model)
                 if flag:
                     break
+    def adapt_epoch(self, data_loader_src,data_loader_trg, meters=None):
+        if meters is None:
+            meters = GroupMeters()
+
+        self._model.eval()
+        self._model_trg.train()
+        end = time.time()
+        data_zip = enumerate(zip(data_loader_src, data_loader_trg))
+        discriminator = Discriminator(10, [100]).to(self.device)
+        optimizer_disc = optim.Adam(discriminator.parameters(), lr=1e-4, betas=(0.5, 0.9))
+        tot_size = 0
+        tot_acc = 0
+        loss_disc = nn.CrossEntropyLoss()
+        loss_encode = nn.CrossEntropyLoss()
+        tot_loss_disc = 0
+        tot_loss_encode = 0
+        loss_recons = nn.MSELoss()
+        optimizer_encode = optim.Adam(self._model_trg.parameters(), lr=1e-4, betas=(0.5, 0.9))
+        for step, ((img1, y1), (img2, _)) in data_zip:
+            # loss, logits, monitors = self._model.to(self.device)(feed_dict)
+            self._model.eval()
+            self._model_trg.eval()
+            z1 = self._model({'input':img1.reshape(-1,784).to(self.device)})['pred'].detach()
+            # z1 = self._model.encoder(img1.reshape(-1,784).to(self.device)).detach()
+            # img2 = img2+torch.randn(img2.size())
+            z2 = self._model_trg({'input':img2.reshape(-1,784).to(self.device)})['pred'].detach()
+            # z2 = self._model_trg.encoder(img2.reshape(-1,784).to(self.device)).detach()
+            z = torch.cat((z1, z2), 0)
+
+            y_domain = discriminator(z)
+
+            label_src = torch.ones(z1.size(0)).long()
+            label_tgt = torch.zeros(z2.size(0)).long()
+            label_concat = torch.cat((label_src, label_tgt), 0)
+
+            label_concat = label_concat.to(self.device)
+
+            ls = loss_disc(y_domain, label_concat)
+            ls.backward()
+            optimizer_disc.step()
+
+            pred_cls = torch.squeeze(y_domain.max(1)[1])
+            # acc = (pred_cls == label_concat).float().mean()
+            tot_acc += (pred_cls == label_concat).float().sum().item()
+            tot_loss_disc += ls.item()
+
+            optimizer_disc.zero_grad()
+            optimizer_encode.zero_grad()
+
+            z2 = self._model_trg({'input':img2.reshape(-1,784).to(self.device)})['pred'].detach()
+            # z2 = self._model_trg.encoder(img2.reshape(-1,784).to(self.device)).detach()
+            z3 = self._model_trg({'input':img1.reshape(-1,784).to(self.device)})['pred'].detach()
+            # z3 = self._model_trg.encoder(img1.reshape(-1,784).to(self.device)).detach()
+            y_domain = discriminator(z2)
+
+            label_tgt = torch.ones(z2.size(0)).long()
+            label_tgt = label_tgt.to(self.device)
+            ls = loss_encode(y_domain, label_tgt)
+            # loss, loss_empi, loss_theo = criterion(z3, y1)
+            # ls += 20 * loss_recons(z3, z1)
+            self._model_trg.train()
+            ls.backward()
+            optimizer_encode.step()
+            tot_loss_encode += ls.item()
+            del img1, img2
+            # probe_infnan(logits, 'logits')
+            # if self.extra_args=='l1-softthresh':
+            #    self._model.mlp[0][0].weight.data = self._model.prox_op(self._model.mlp[0][0].weight)
+
+            #if dev:
+            #meters.update({'time/data': data_time, 'time/step': step_time})
+        tot_los_disc = tot_loss_disc / len(data_loader_src.dataset)
+        tot_loss_encode = tot_loss_encode / len(data_loader_src.dataset)
+        print(f'epoch  disc loss is {tot_los_disc}')
+        print(f'epoch  encode loss is {tot_loss_encode}')
+        # print(f'epoch  acc is {tot_acc / tot_size}')
+        return meters
+
 
     def validate_step(self, feed_dict, metric, meters=None, mode='valid'):
         with torch.no_grad():
@@ -319,4 +418,25 @@ class STG(object):
             return self._model.get_gates(mode, x)
         else:
             return self._model.get_gates(mode)
+
+    def adapt(self, data_loader_src,data_loader_trg, nr_epochs, val_data_loader=None, verbose=True,
+        meters=None, early_stop=None, print_interval=1):
+        self._model_trg = copy.deepcopy(self._model)
+        if meters is None:
+            meters = GroupMeters()
+
+        for epoch in range(1, 1 + nr_epochs):
+            print(epoch)
+            meters.reset()
+            if epoch == self.freeze_onward:
+                self._model.freeze_weights()
+            self.adapt_epoch(data_loader_src,data_loader_trg, meters=meters)
+            if verbose and epoch % print_interval == 0:
+                self.validate(val_data_loader, self.metric, meters)
+                caption = 'Epoch: {}:'.format(epoch)
+                print(meters.format_simple(caption))
+            if early_stop is not None:
+                flag = early_stop(self._model)
+                if flag:
+                    break
 

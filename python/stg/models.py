@@ -165,7 +165,7 @@ class LSPINRegressionModel(LSPINModel, ModelIOKeysMixin):
 
 class LSPINClassificationModel(MLPModel, ModelIOKeysMixin):
     def __init__(self, input_dim, output_dim, hidden_dims, gating_net_hidden_dims,
-                device, batch_norm=None, dropout=None,
+                device, batch_norm=True, dropout=None,
                 activation='relu', sigma=1.0, lam=0.1):
         super().__init__(input_dim, output_dim, hidden_dims,
                          batch_norm=batch_norm, dropout=dropout, activation='identity')
