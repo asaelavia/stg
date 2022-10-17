@@ -6,19 +6,22 @@ from torch import optim
 from torch.utils.data import DataLoader
 
 from encoder import Discriminator
-from .models import STGClassificationModel, STGRegressionModel, MLPClassificationModel, MLPRegressionModel, STGCoxModel, MLPCoxModel, L1RegressionModel, SoftThreshRegressionModel, L1GateRegressionModel, LSPINRegressionModel, LSPINClassificationModel
-from .utils import get_optimizer, as_tensor, as_float, as_numpy, as_cpu, SimpleDataset, FastTensorDataLoader, probe_infnan
+from .models import STGClassificationModel, STGRegressionModel, MLPClassificationModel, MLPRegressionModel, STGCoxModel, \
+    MLPCoxModel, L1RegressionModel, SoftThreshRegressionModel, L1GateRegressionModel, LSPINRegressionModel, \
+    LSPINClassificationModel
+from .utils import get_optimizer, as_tensor, as_float, as_numpy, as_cpu, SimpleDataset, FastTensorDataLoader, \
+    probe_infnan
 from .io import load_state_dict, state_dict
 from .meter import GroupMeters
 from .losses import calc_concordance_index, PartialLogLikelihood
 
-import logging.config 
+import logging.config
 import os.path as osp
 import time
 import numpy as np
 import logging
-logger = logging.getLogger("my-logger")
 
+logger = logging.getLogger("my-logger")
 
 __all__ = ['STG']
 
@@ -36,16 +39,16 @@ def _standard_truncnorm_sample(lower_bound, upper_bound, sample_shape=torch.Size
         stable results
     """
     x = torch.randn(sample_shape)
-    done = torch.zeros(sample_shape).byte() 
+    done = torch.zeros(sample_shape).byte()
     while not done.all():
         proposed_x = lower_bound + torch.rand(sample_shape) * (upper_bound - lower_bound)
         if (upper_bound * lower_bound).lt(0.0):  # of opposite sign
-            log_prob_accept = -0.5 * proposed_x**2
+            log_prob_accept = -0.5 * proposed_x ** 2
         elif upper_bound < 0.0:  # both negative
-            log_prob_accept = 0.5 * (upper_bound**2 - proposed_x**2)
+            log_prob_accept = 0.5 * (upper_bound ** 2 - proposed_x ** 2)
         else:  # both positive
-            assert(lower_bound.gt(0.0))
-            log_prob_accept = 0.5 * (lower_bound**2 - proposed_x**2)
+            assert (lower_bound.gt(0.0))
+            log_prob_accept = 0.5 * (lower_bound ** 2 - proposed_x ** 2)
         prob_accept = torch.exp(log_prob_accept).clamp_(0.0, 1.0)
         accept = torch.bernoulli(prob_accept).byte() & ~done
         if accept.any():
@@ -58,22 +61,23 @@ def _standard_truncnorm_sample(lower_bound, upper_bound, sample_shape=torch.Size
 
 class STG(object):
     def __init__(self, device, input_dim=784, output_dim=10, hidden_dims=[400, 200],
-                activation='relu', sigma=0.5, lam=1,
-                optimizer='Adam', learning_rate=5e-2,  batch_size=100, freeze_onward=None, feature_selection=True, weight_decay=1e-3,
-                task_type='classification', report_maps=False, random_state=1, extra_args=None):
+                 activation='relu', sigma=0.5, lam=1,
+                 optimizer='Adam', learning_rate=5e-2, batch_size=100, freeze_onward=None, feature_selection=True,
+                 weight_decay=1e-3,
+                 task_type='classification', report_maps=False, random_state=1, extra_args=None):
         self.batch_size = batch_size
         self.activation = activation
         self.device = self.get_device(device)
-        self.report_maps = report_maps 
+        self.report_maps = report_maps
         self.task_type = task_type
         self.extra_args = extra_args
         self.freeze_onward = freeze_onward
-        self._model = self.build_model(input_dim, output_dim, hidden_dims, activation, sigma, lam, 
+        self._model = self.build_model(input_dim, output_dim, hidden_dims, activation, sigma, lam,
                                        task_type, feature_selection)
-        #self._model.apply(self.init_weights)
+        # self._model.apply(self.init_weights)
         self._model = self._model.to(device)
         self._optimizer = get_optimizer(optimizer, self._model, lr=learning_rate, weight_decay=weight_decay)
-    
+
     def get_device(self, device):
         if device == "cpu":
             device = torch.device("cpu")
@@ -83,33 +87,33 @@ class STG(object):
         else:
             raise NotImplementedError("Only 'cpu' or 'cuda' is a valid option.")
         return device
-        
-        
+
     def init_weights(self, m):
         if isinstance(m, nn.Linear):
             stddev = torch.tensor(0.1)
             shape = m.weight.shape
-            m.weight = nn.Parameter(_standard_truncnorm_sample(lower_bound=-2*stddev, upper_bound=2*stddev, 
-                                  sample_shape=shape))
+            m.weight = nn.Parameter(_standard_truncnorm_sample(lower_bound=-2 * stddev, upper_bound=2 * stddev,
+                                                               sample_shape=shape))
             torch.nn.init.zeros_(m.bias)
 
     def build_model(self, input_dim, output_dim, hidden_dims, activation, sigma, lam, task_type, feature_selection):
         if task_type == 'classification':
             self.metric = nn.CrossEntropyLoss()
-            self.tensor_names = ('input','label')
+            self.tensor_names = ('input', 'label')
             if feature_selection:
                 if 'gating_net_hidden_dims' in self.extra_args:
-                    return LSPINClassificationModel(input_dim, output_dim, hidden_dims, 
-                        gating_net_hidden_dims=self.extra_args['gating_net_hidden_dims'],
-                        device=self.device, activation=activation, sigma=sigma, lam=lam)
+                    return LSPINClassificationModel(input_dim, output_dim, hidden_dims,
+                                                    gating_net_hidden_dims=self.extra_args['gating_net_hidden_dims'],
+                                                    device=self.device, activation=activation, sigma=sigma, lam=lam)
                 else:
-                    return STGClassificationModel(input_dim, output_dim, hidden_dims, device=self.device, activation=activation, sigma=sigma, lam=lam)
+                    return STGClassificationModel(input_dim, output_dim, hidden_dims, device=self.device,
+                                                  activation=activation, sigma=sigma, lam=lam)
             else:
                 return MLPClassificationModel(input_dim, output_dim, hidden_dims, activation=activation)
         elif task_type == 'regression':
             assert output_dim == 1
             self.metric = nn.MSELoss()
-            self.tensor_names = ('input','label')
+            self.tensor_names = ('input', 'label')
             '''
             if self.extra_args is not None:
                 if self.extra_args == 'l1-softthresh':
@@ -123,18 +127,20 @@ class STG(object):
             '''
             if feature_selection:
                 if 'gating_net_hidden_dims' in self.extra_args:
-                    return LSPINRegressionModel(input_dim, output_dim, hidden_dims, 
-                        gating_net_hidden_dims=self.extra_args['gating_net_hidden_dims'],
-                        device=self.device, activation=activation, sigma=sigma, lam=lam)
+                    return LSPINRegressionModel(input_dim, output_dim, hidden_dims,
+                                                gating_net_hidden_dims=self.extra_args['gating_net_hidden_dims'],
+                                                device=self.device, activation=activation, sigma=sigma, lam=lam)
                 else:
-                    return STGRegressionModel(input_dim, output_dim, hidden_dims, device=self.device, activation=activation, sigma=sigma, lam=lam)
+                    return STGRegressionModel(input_dim, output_dim, hidden_dims, device=self.device,
+                                              activation=activation, sigma=sigma, lam=lam)
             else:
                 return MLPRegressionModel(input_dim, output_dim, hidden_dims, activation=activation)
         elif task_type == 'cox':
             self.metric = PartialLogLikelihood
             self.tensor_names = ('X', 'E', 'T')
             if feature_selection:
-                return STGCoxModel(input_dim, output_dim, hidden_dims, device=self.device, activation=activation, sigma=sigma, lam=lam)
+                return STGCoxModel(input_dim, output_dim, hidden_dims, device=self.device, activation=activation,
+                                   sigma=sigma, lam=lam)
             else:
                 return MLPCoxModel(input_dim, output_dim, hidden_dims, activation=activation)
         else:
@@ -147,46 +153,48 @@ class STG(object):
         self._optimizer.zero_grad()
         loss.backward()
         self._optimizer.step()
-        #probe_infnan(logits, 'logits')
-        if self.task_type=='cox':
-            ci = calc_concordance_index(logits.detach().numpy(), 
-                    feed_dict['E'].detach().numpy(), feed_dict['T'].detach().numpy())
-        #if self.extra_args=='l1-softthresh':
+        # probe_infnan(logits, 'logits')
+        if self.task_type == 'cox':
+            ci = calc_concordance_index(logits.detach().numpy(),
+                                        feed_dict['E'].detach().numpy(), feed_dict['T'].detach().numpy())
+        # if self.extra_args=='l1-softthresh':
         #    self._model.mlp[0][0].weight.data = self._model.prox_op(self._model.mlp[0][0].weight)
 
         loss = as_float(loss)
         if meters is not None:
             meters.update(loss=loss)
-            if self.task_type =='cox':
+            if self.task_type == 'cox':
                 meters.update(CI=ci)
             meters.update(monitors)
 
     def get_dataloader(self, X, y, shuffle):
         if self.task_type == 'classification':
-            data_loader = FastTensorDataLoader(torch.from_numpy(X).float().to(self.device), 
-                        torch.from_numpy(y).long().to(self.device), tensor_names=self.tensor_names,
-                        batch_size=self.batch_size, shuffle=shuffle)
+            data_loader = FastTensorDataLoader(torch.from_numpy(X).float().to(self.device),
+                                               torch.from_numpy(y).long().to(self.device),
+                                               tensor_names=self.tensor_names,
+                                               batch_size=self.batch_size, shuffle=shuffle)
 
         elif self.task_type == 'regression':
-            data_loader = FastTensorDataLoader(torch.from_numpy(X).float().to(self.device), 
-                        torch.from_numpy(y).float().to(self.device), tensor_names=self.tensor_names,
-                        batch_size=self.batch_size, shuffle=shuffle)
+            data_loader = FastTensorDataLoader(torch.from_numpy(X).float().to(self.device),
+                                               torch.from_numpy(y).float().to(self.device),
+                                               tensor_names=self.tensor_names,
+                                               batch_size=self.batch_size, shuffle=shuffle)
 
         elif self.task_type == 'cox':
             assert isinstance(y, dict)
-            data_loader = FastTensorDataLoader(torch.from_numpy(X).float().to(self.device), 
-                        torch.from_numpy(y['E']).float().to(self.device),
-                        torch.from_numpy(y['T']).float().to(self.device),
-                        tensor_names=self.tensor_names,
-                        batch_size=self.batch_size, shuffle=shuffle)
+            data_loader = FastTensorDataLoader(torch.from_numpy(X).float().to(self.device),
+                                               torch.from_numpy(y['E']).float().to(self.device),
+                                               torch.from_numpy(y['T']).float().to(self.device),
+                                               tensor_names=self.tensor_names,
+                                               batch_size=self.batch_size, shuffle=shuffle)
 
         else:
             raise NotImplementedError()
 
-        return data_loader 
+        return data_loader
 
-    def fit(self, X, y, nr_epochs, valid_X=None, valid_y=None, 
-        verbose=True, meters=None, early_stop=None, print_interval=1, shuffle=False):
+    def fit(self, X, y, nr_epochs, valid_X=None, valid_y=None,
+            verbose=True, meters=None, early_stop=None, print_interval=1, shuffle=False):
         data_loader = self.get_dataloader(X, y, shuffle)
 
         if valid_X is not None:
@@ -203,7 +211,7 @@ class STG(object):
 
     def predict(self, X, verbose=True):
         dataset = SimpleDataset(X)
-        data_loader = DataLoader(dataset, batch_size=X.shape[0], shuffle=False) 
+        data_loader = DataLoader(dataset, batch_size=X.shape[0], shuffle=False)
         res = []
         self._model.eval()
         for feed_dict in data_loader:
@@ -211,7 +219,7 @@ class STG(object):
             feed_dict = as_tensor(feed_dict)
             with torch.no_grad():
                 feed_dict['input'] = feed_dict['input'].to(self.device)
-                output_dict = self._model(feed_dict)
+                output_dict = self._model.to(self.device)(feed_dict)
             output_dict_np = as_numpy(output_dict)
             res.append(output_dict_np['pred'])
         return np.concatenate(res, axis=0)
@@ -238,15 +246,17 @@ class STG(object):
         self._model.train()
         end = time.time()
         for feed_dict in data_loader:
-            data_time = time.time() - end; end = time.time()
+            data_time = time.time() - end;
+            end = time.time()
             self.train_step(feed_dict, meters=meters)
-            step_time = time.time() - end; end = time.time()
-            #if dev:
-            #meters.update({'time/data': data_time, 'time/step': step_time})
+            step_time = time.time() - end;
+            end = time.time()
+            # if dev:
+            # meters.update({'time/data': data_time, 'time/step': step_time})
         return meters
 
-    def train(self, data_loader, nr_epochs, val_data_loader=None, verbose=True, 
-        meters=None, early_stop=None, print_interval=1):
+    def train(self, data_loader, nr_epochs, val_data_loader=None, verbose=True,
+              meters=None, early_stop=None, print_interval=1):
         if meters is None:
             meters = GroupMeters()
 
@@ -264,7 +274,9 @@ class STG(object):
                 flag = early_stop(self._model)
                 if flag:
                     break
-    def adapt_epoch(self, data_loader_src,data_loader_trg, meters=None):
+
+    def adapt_epoch(self, data_loader_src, data_loader_trg, discriminator, optimizer_disc, optimizer_encode,
+                    meters=None):
         if meters is None:
             meters = GroupMeters()
 
@@ -272,8 +284,7 @@ class STG(object):
         self._model_trg.train()
         end = time.time()
         data_zip = enumerate(zip(data_loader_src, data_loader_trg))
-        discriminator = Discriminator(10, [100]).to(self.device)
-        optimizer_disc = optim.Adam(discriminator.parameters(), lr=1e-4, betas=(0.5, 0.9))
+
         tot_size = 0
         tot_acc = 0
         loss_disc = nn.CrossEntropyLoss()
@@ -281,15 +292,16 @@ class STG(object):
         tot_loss_disc = 0
         tot_loss_encode = 0
         loss_recons = nn.MSELoss()
-        optimizer_encode = optim.Adam(self._model_trg.parameters(), lr=1e-4, betas=(0.5, 0.9))
         for step, ((img1, y1), (img2, _)) in data_zip:
             # loss, logits, monitors = self._model.to(self.device)(feed_dict)
-            self._model.eval()
-            self._model_trg.eval()
-            z1 = self._model({'input':img1.reshape(-1,784).to(self.device)})['pred'].detach()
+            img1 = img1.reshape(-1, 784).to(self.device)
+            img2 = img2.reshape(-1, 784).to(self.device)
+            z1 = self._model({'input': img1})['pred']
             # z1 = self._model.encoder(img1.reshape(-1,784).to(self.device)).detach()
             # img2 = img2+torch.randn(img2.size())
-            z2 = self._model_trg({'input':img2.reshape(-1,784).to(self.device)})['pred'].detach()
+            self._model_trg.eval()
+            z2 = self._model_trg({'input': img2})['pred']
+            self._model_trg.train()
             # z2 = self._model_trg.encoder(img2.reshape(-1,784).to(self.device)).detach()
             z = torch.cat((z1, z2), 0)
 
@@ -312,10 +324,11 @@ class STG(object):
 
             optimizer_disc.zero_grad()
             optimizer_encode.zero_grad()
-
-            z2 = self._model_trg({'input':img2.reshape(-1,784).to(self.device)})['pred'].detach()
+            self._model_trg.eval()
+            z2 = self._model_trg({'input': img2})['pred']
             # z2 = self._model_trg.encoder(img2.reshape(-1,784).to(self.device)).detach()
-            z3 = self._model_trg({'input':img1.reshape(-1,784).to(self.device)})['pred'].detach()
+            z3 = self._model_trg({'input': img1})['pred']
+            self._model_trg.train()
             # z3 = self._model_trg.encoder(img1.reshape(-1,784).to(self.device)).detach()
             y_domain = discriminator(z2)
 
@@ -324,7 +337,7 @@ class STG(object):
             ls = loss_encode(y_domain, label_tgt)
             # loss, loss_empi, loss_theo = criterion(z3, y1)
             # ls += 20 * loss_recons(z3, z1)
-            self._model_trg.train()
+            # self._model_trg.train()
             ls.backward()
             optimizer_encode.step()
             tot_loss_encode += ls.item()
@@ -333,8 +346,8 @@ class STG(object):
             # if self.extra_args=='l1-softthresh':
             #    self._model.mlp[0][0].weight.data = self._model.prox_op(self._model.mlp[0][0].weight)
 
-            #if dev:
-            #meters.update({'time/data': data_time, 'time/step': step_time})
+            # if dev:
+            # meters.update({'time/data': data_time, 'time/step': step_time})
         tot_los_disc = tot_loss_disc / len(data_loader_src.dataset)
         tot_loss_encode = tot_loss_encode / len(data_loader_src.dataset)
         print(f'epoch  disc loss is {tot_los_disc}')
@@ -342,27 +355,27 @@ class STG(object):
         # print(f'epoch  acc is {tot_acc / tot_size}')
         return meters
 
-
     def validate_step(self, feed_dict, metric, meters=None, mode='valid'):
         with torch.no_grad():
             pred = self._model(feed_dict)
         if self.task_type == 'classification':
-            result = metric(pred['logits'], self._model._get_label(feed_dict))
+            # result = metric(pred['logits'], self._model._get_label(feed_dict))
+            result = metric(pred['pred'], self._model._get_label(feed_dict))
         elif self.task_type == 'regression':
             result = metric(pred['pred'], self._model._get_label(feed_dict))
-            
+
         elif self.task_type == 'cox':
-            result = metric(pred['logits'], self._model._get_fail_indicator(feed_dict), 'noties') 
-            val_CI = calc_concordance_index(pred['logits'].detach().numpy(), 
-                    feed_dict['E'].detach().numpy(), feed_dict['T'].detach().numpy())
+            result = metric(pred['logits'], self._model._get_fail_indicator(feed_dict), 'noties')
+            val_CI = calc_concordance_index(pred['logits'].detach().numpy(),
+                                            feed_dict['E'].detach().numpy(), feed_dict['T'].detach().numpy())
             result = as_float(result)
         else:
             raise NotImplementedError()
 
         if meters is not None:
-            meters.update({mode+'_loss':result})
-            if self.task_type=='cox':
-                meters.update({mode+'_CI':val_CI})
+            meters.update({mode + '_loss': result})
+            if self.task_type == 'cox':
+                meters.update({mode + '_CI': val_CI})
 
     def validate(self, data_loader, metric, meters=None, mode='valid'):
         if meters is None:
@@ -371,9 +384,11 @@ class STG(object):
         self._model.eval()
         end = time.time()
         for fd in data_loader:
-            data_time = time.time() - end; end = time.time()
+            data_time = time.time() - end;
+            end = time.time()
             self.validate_step(fd, metric, meters=meters, mode=mode)
-            step_time = time.time() - end; end = time.time()
+            step_time = time.time() - end;
+            end = time.time()
 
         return meters.avg
 
@@ -419,18 +434,22 @@ class STG(object):
         else:
             return self._model.get_gates(mode)
 
-    def adapt(self, data_loader_src,data_loader_trg, nr_epochs, val_data_loader=None, verbose=True,
-        meters=None, early_stop=None, print_interval=1):
+    def adapt(self, data_loader_src, data_loader_trg, nr_epochs, val_data_loader=None, verbose=True,
+              meters=None, early_stop=None, print_interval=1):
         self._model_trg = copy.deepcopy(self._model)
         if meters is None:
             meters = GroupMeters()
-
+        discriminator = Discriminator(10, [500,1000]).to(self.device)
+        optimizer_disc = optim.Adam(discriminator.parameters(), lr=1e-4, betas=(0.5, 0.9))
+        optimizer_encode = optim.Adam(self._model_trg.parameters(), lr=1e-4, betas=(0.5, 0.9))
         for epoch in range(1, 1 + nr_epochs):
             print(epoch)
             meters.reset()
             if epoch == self.freeze_onward:
                 self._model.freeze_weights()
-            self.adapt_epoch(data_loader_src,data_loader_trg, meters=meters)
+
+            self.adapt_epoch(data_loader_src, data_loader_trg, discriminator, optimizer_disc, optimizer_encode,
+                             meters=meters)
             if verbose and epoch % print_interval == 0:
                 self.validate(val_data_loader, self.metric, meters)
                 caption = 'Epoch: {}:'.format(epoch)
@@ -439,4 +458,3 @@ class STG(object):
                 flag = early_stop(self._model)
                 if flag:
                     break
-
