@@ -221,6 +221,7 @@ class LSPINClassificationModel(MLPModel, ModelIOKeysMixin):
 
     def forward(self, feed_dict):
         x, mu = self.FeatureSelector(self._get_input(feed_dict))
+        # x, mu = self.FeatureSelector(feed_dict)
         pred = super().forward(x)
         if self.training:
             loss = self.loss(pred, self._get_label(feed_dict))
