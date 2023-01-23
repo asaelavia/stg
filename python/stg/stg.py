@@ -3,7 +3,7 @@ import copy
 import torch
 import torch.nn as nn
 from torch import optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 
 from encoder import Discriminator
 from .models import STGClassificationModel, STGRegressionModel, MLPClassificationModel, MLPRegressionModel, STGCoxModel, \
@@ -261,7 +261,7 @@ class STG(object):
             meters = GroupMeters()
 
         for epoch in range(1, 1 + nr_epochs):
-            print(epoch)
+            # print(epoch)
             meters.reset()
             if epoch == self.freeze_onward:
                 self._model.freeze_weights()
@@ -275,13 +275,14 @@ class STG(object):
                 if flag:
                     break
 
-    def adapt_epoch(self, data_loader_src, data_loader_trg, discriminator, optimizer_disc, optimizer_encode,
+    def adapt_epoch(self, data_loader_src, data_loader_trg, model_src, model_trg, discriminator, optimizer_disc,
+                    optimizer_encode,
                     meters=None):
         if meters is None:
             meters = GroupMeters()
 
-        self._model.eval()
-        self._model_trg.train()
+        model_src.eval()
+        model_trg.train()
         end = time.time()
         data_zip = enumerate(zip(data_loader_src, data_loader_trg))
 
@@ -294,14 +295,19 @@ class STG(object):
         loss_recons = nn.MSELoss()
         for step, ((img1, y1), (img2, _)) in data_zip:
             # loss, logits, monitors = self._model.to(self.device)(feed_dict)
-            img1 = img1.reshape(-1, 784).to(self.device)
-            img2 = img2.reshape(-1, 784).to(self.device)
-            z1 = self._model({'input': img1})['pred']
+            # img1 = img1.reshape(-1, 784).to(self.device)
+            # img2 = img2.reshape(-1, 784).to(self.device)
+            img1 = img1.to(self.device)
+            img2 = img2.to(self.device)
+            # z1 = self._model({'input': img1})['pred']
+            # z1 = self._model(img1)
+            z1 = model_src(img1)
             # z1 = self._model.encoder(img1.reshape(-1,784).to(self.device)).detach()
-            # img2 = img2+torch.randn(img2.size())
-            self._model_trg.eval()
-            z2 = self._model_trg({'input': img2})['pred']
-            self._model_trg.train()
+            # self._model_trg.eval()
+            # z2 = self._model_trg({'input': img2})['pred']
+            # z2 = self._model_trg({'input': img2})['pred']
+            z2 = model_trg(img2)
+            # self._model_trg.train()
             # z2 = self._model_trg.encoder(img2.reshape(-1,784).to(self.device)).detach()
             z = torch.cat((z1, z2), 0)
 
@@ -312,7 +318,7 @@ class STG(object):
             label_concat = torch.cat((label_src, label_tgt), 0)
 
             label_concat = label_concat.to(self.device)
-
+            # print((y_domain.argmax(1) == label_concat).float().mean())
             ls = loss_disc(y_domain, label_concat)
             ls.backward()
             optimizer_disc.step()
@@ -324,11 +330,14 @@ class STG(object):
 
             optimizer_disc.zero_grad()
             optimizer_encode.zero_grad()
-            self._model_trg.eval()
-            z2 = self._model_trg({'input': img2})['pred']
+            # self._model_trg.eval()
+            # z2 = self._model_trg({'input': img2})['pred']
+            z2 = model_trg(img2)
+            z1 = model_src(img1)
+            z3 = model_trg(img1)
             # z2 = self._model_trg.encoder(img2.reshape(-1,784).to(self.device)).detach()
-            z3 = self._model_trg({'input': img1})['pred']
-            self._model_trg.train()
+            # z3 = self._model_trg({'input': img1})['pred']
+            # self._model_trg.train()
             # z3 = self._model_trg.encoder(img1.reshape(-1,784).to(self.device)).detach()
             y_domain = discriminator(z2)
 
@@ -350,10 +359,11 @@ class STG(object):
             # meters.update({'time/data': data_time, 'time/step': step_time})
         tot_los_disc = tot_loss_disc / len(data_loader_src.dataset)
         tot_loss_encode = tot_loss_encode / len(data_loader_src.dataset)
-        print(f'epoch  disc loss is {tot_los_disc}')
-        print(f'epoch  encode loss is {tot_loss_encode}')
+        # print(f'epoch  disc loss is {tot_los_disc}')
+        # print(f'epoch  encode loss is {tot_loss_encode}')
         # print(f'epoch  acc is {tot_acc / tot_size}')
-        return meters
+        # self._model.FeatureSelector.net.encoder = self._model_trg
+        return meters, discriminator, model_trg
 
     def validate_step(self, feed_dict, metric, meters=None, mode='valid'):
         with torch.no_grad():
@@ -434,27 +444,85 @@ class STG(object):
         else:
             return self._model.get_gates(mode)
 
-    def adapt(self, data_loader_src, data_loader_trg, nr_epochs, val_data_loader=None, verbose=True,
-              meters=None, early_stop=None, print_interval=1):
-        self._model_trg = copy.deepcopy(self._model)
+    def adapt(self, X_train, y_train, X_targ, y_targ, nr_epochs, print_interval=100, meters=None, verbose=None,
+              early_stop=None):
+        data_loader_src = DataLoader(TensorDataset(torch.tensor(X_train), torch.tensor(y_train)), 256)
+        data_loader_trg = DataLoader(TensorDataset(torch.tensor(X_targ), torch.tensor(y_targ)), 256)
+        model_src = self._model.FeatureSelector.net.encoder
+        model_trg = copy.deepcopy(model_src)
         if meters is None:
             meters = GroupMeters()
-        discriminator = Discriminator(10, [500,1000]).to(self.device)
-        optimizer_disc = optim.Adam(discriminator.parameters(), lr=1e-4, betas=(0.5, 0.9))
-        optimizer_encode = optim.Adam(self._model_trg.parameters(), lr=1e-4, betas=(0.5, 0.9))
+        discriminator = Discriminator(100, [100]).to(self.device)
+        discriminator.train()
+        optimizer_disc = optim.SGD(discriminator.parameters(), lr=1e-3)
+        optimizer_encode = optim.SGD(model_trg.parameters(), lr=1e-3)
+        # optimizer_disc = optim.ASGD(discriminator.parameters(), lr=1e-3)
+        # optimizer_encode = optim.ASGD(model_trg.parameters(), lr=1e-3)
+        # optimizer_disc = optim.Adam(discriminator.parameters(), lr=1e-3, betas=(0.5, 0.9))
+        # optimizer_encode = optim.Adam(model_trg.parameters(), lr=1e-3, betas=(0.5, 0.9))
         for epoch in range(1, 1 + nr_epochs):
-            print(epoch)
+            if epoch % print_interval == 0:
+                print(epoch)
             meters.reset()
             if epoch == self.freeze_onward:
                 self._model.freeze_weights()
 
-            self.adapt_epoch(data_loader_src, data_loader_trg, discriminator, optimizer_disc, optimizer_encode,
-                             meters=meters)
-            if verbose and epoch % print_interval == 0:
-                self.validate(val_data_loader, self.metric, meters)
-                caption = 'Epoch: {}:'.format(epoch)
-                print(meters.format_simple(caption))
+            _, discriminator, model_trg = self.adapt_epoch(data_loader_src, data_loader_trg, model_src, model_trg,
+                                                           discriminator, optimizer_disc, optimizer_encode,
+                                                           meters=meters)
+            # if verbose and epoch % print_interval == 0:
+            #     self.validate(val_data_loader, self.metric, meters)
+            #     caption = 'Epoch: {}:'.format(epoch)
+            #     print(meters.format_simple(caption))
             if early_stop is not None:
                 flag = early_stop(self._model)
                 if flag:
                     break
+        self._model.FeatureSelector.net.encoder = model_trg
+
+    def adapt_new(self, X_train, y_train, X_train_targ, y_train_targ, nr_epochs, valid_X, valid_y, print_interval,
+                  verbose=True, meters=None, early_stop=None, shuffle=True):
+        data_loader = self.get_dataloader(X_train, y_train, shuffle)
+        if meters is None:
+            meters = GroupMeters()
+
+        self._model.train()
+        end = time.time()
+        for feed_dict in data_loader:
+            loss, logits, monitors = self._model.to(self.device)(feed_dict)
+            self._optimizer.zero_grad()
+
+        data_loader_src = DataLoader(TensorDataset(torch.tensor(X_train), torch.tensor(y_train)), 256)
+        data_loader_trg = DataLoader(TensorDataset(torch.tensor(X_train_targ), torch.tensor(y_train_targ)), 256)
+        model_src = self._model.FeatureSelector.net.encoder
+        model_trg = copy.deepcopy(model_src)
+        if meters is None:
+            meters = GroupMeters()
+        discriminator = Discriminator(100, [100]).to(self.device)
+        discriminator.train()
+        optimizer_disc = optim.SGD(discriminator.parameters(), lr=1e-3)
+        optimizer_encode = optim.SGD(model_trg.parameters(), lr=1e-3)
+        for epoch in range(1, 1 + nr_epochs):
+            if epoch % print_interval == 0:
+                print(epoch)
+            meters.reset()
+            if epoch == self.freeze_onward:
+                self._model.freeze_weights()
+
+            _, discriminator, model_trg = self.adapt_epoch(data_loader_src, data_loader_trg, model_src, model_trg,
+                                                           discriminator, optimizer_disc, optimizer_encode,
+                                                           meters=meters)
+            # if verbose and epoch % print_interval == 0:
+            #     self.validate(val_data_loader, self.metric, meters)
+            #     caption = 'Epoch: {}:'.format(epoch)
+            #     print(meters.format_simple(caption))
+            if early_stop is not None:
+                flag = early_stop(self._model)
+                if flag:
+                    break
+        self._model.FeatureSelector.net.encoder = model_trg
+    pass
+
+    def train_adapt(self, data_loader, nr_epochs, val_data_loader, verbose, meters, early_stop, print_interval):
+
+        pass

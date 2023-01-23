@@ -125,8 +125,8 @@ class MLPLayer(nn.Module):
             modules.append(layer)
         layer = nn.Linear(dims[-2], dims[-1], bias=True)
         modules.append(layer)
-        self.mlp = nn.Sequential(*modules[2:])
-        self.encoder = nn.Sequential(*modules[0:2])
+        self.mlp = nn.Sequential(*modules[-1:])
+        self.encoder = nn.Sequential(*modules[0:-1])
         self.flatten = flatten
 
     def reset_parameters(self):
